@@ -20,7 +20,7 @@ from torchvision import transforms
 from PIL import Image
 from scipy.ndimage import rotate
 
-DATA_DIR = '/home/aravind/data/omniglot-py/'
+DATA_DIR = "/home/adithi-samudrala/imaml_dev/omniglot/python"
 
 class SinusoidDataset(Dataset):
     def __init__(self, num_tasks=100, train_inst=10, val_inst=10, GPU=False, float16=False):
@@ -141,7 +141,9 @@ class OmniglotTask(object):
         self.val_ids = []
         for c in classes:
             # First get all isntances of that class
-            temp = [os.path.join(c, x) for x in os.listdir(c)]
+            print("DEBUG c =", c, "type:", type(c))
+
+            temp = [os.path.join(c, x.decode() if isinstance(x, bytes) else x) for x in os.listdir(c)]
             instances[c] = random.sample(temp, len(temp))
             # Sample num_inst instances randomly each for train and val
             self.train_ids += instances[c][:num_inst]

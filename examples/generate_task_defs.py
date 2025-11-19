@@ -16,7 +16,7 @@ train_val_permutation = list(range(1623))
 random.shuffle(train_val_permutation)
 
 parser = argparse.ArgumentParser(description='Pregenerate task definitions')
-parser.add_argument('--data_dir', type=str, default='/home/aravind/data/omniglot-py/',
+parser.add_argument('--data_dir', type=str, default='/home/adithi-samudrala/imaml_dev/omniglot/python',
                     help='location of the dataset')
 parser.add_argument('--task', type=str, default='Omniglot')
 parser.add_argument('--num_tasks', type=int, default=20000)
