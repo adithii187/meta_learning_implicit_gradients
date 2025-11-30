@@ -1,3 +1,8 @@
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -8,13 +13,15 @@ import pickle
 import argparse
 import pathlib
 
+
+
 from tqdm import tqdm
 from implicit_maml.dataset import OmniglotTask, OmniglotFewShotDataset
 from implicit_maml.learner_model import Learner
 from implicit_maml.learner_model import make_fc_network, make_conv_network
 from implicit_maml.utils import DataLog
 
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt 
 
 np.random.seed(123)
 torch.manual_seed(123)
@@ -71,6 +78,8 @@ if args.load_agent is None:
                            inner_lr=args.inner_lr, outer_lr=args.outer_lr, GPU=args.use_gpu)
     fast_learner = Learner(model=fast_net, loss_function=torch.nn.CrossEntropyLoss(), inner_alg=args.inner_alg,
                            inner_lr=args.inner_lr, outer_lr=args.outer_lr, GPU=args.use_gpu)
+    meta_learner.inner_steps = args.n_steps
+    fast_learner.inner_steps = args.n_steps
 else:
     meta_learner = pickle.load(open(args.load_agent, 'rb'))
     meta_learner.set_params(meta_learner.get_params())
@@ -106,24 +115,73 @@ for outstep in tqdm(range(args.meta_steps)):
         vl_before = fast_learner.get_loss(task['x_val'], task['y_val'], return_numpy=True)
         tl = fast_learner.learn_task(task, num_steps=args.n_steps)
         # pull back for regularization
-        fast_learner.inner_opt.zero_grad()
-        regu_loss = fast_learner.regularization_loss(w_k, lam)
-        regu_loss.backward()
-        fast_learner.inner_opt.step()
+        
+        #not required for explicit maml
+        # fast_learner.inner_opt.zero_grad()
+        # regu_loss = fast_learner.regularization_loss(w_k, lam)
+        # regu_loss.backward()
+        # fast_learner.inner_opt.step()
+        # vl_after = fast_learner.get_loss(task['x_val'], task['y_val'], return_numpy=True)
+        
+        # Inner loop adaptation
+
+        # Validation loss after adaptation
         vl_after = fast_learner.get_loss(task['x_val'], task['y_val'], return_numpy=True)
         tacc = utils.measure_accuracy(task, fast_learner, train=True)
         vacc = utils.measure_accuracy(task, fast_learner, train=False)
         
+# ... inside the `for outstep in tqdm(range(args.meta_steps)):` loop
+# ... inside the `for idx in task_mb:` loop
+
+# ... (inner loop adaptation code remains the same)
+
+        # Validation loss and gradient calculation
         valid_loss = fast_learner.get_loss(task['x_val'], task['y_val'])
-        valid_grad = torch.autograd.grad(valid_loss, fast_learner.model.parameters())
-        flat_grad = torch.cat([g.contiguous().view(-1) for g in valid_grad])
-        
-        if args.cg_steps <= 1:
-            task_outer_grad = flat_grad
-        else:
+        valid_grad = torch.autograd.grad(valid_loss, fast_learner.model.parameters(), create_graph=True) # create_graph=True for FOML
+        flat_valid_grad = torch.cat([g.contiguous().view(-1) for g in valid_grad])
+
+        # Get the parameters before and after the inner update
+        w_k = meta_learner.get_params()
+        w_k_plus_1 = fast_learner.get_params()
+
+        if args.outer_alg == 'imaml':
+            # Your existing implicit MAML with Conjugate Gradient
             task_matrix_evaluator = fast_learner.matrix_evaluator(task, lam, args.cg_damping)
-            task_outer_grad = utils.cg_solve(task_matrix_evaluator, flat_grad, args.cg_steps, x_init=None)
-        
+            task_outer_grad = utils.cg_solve(task_matrix_evaluator, flat_valid_grad, args.cg_steps, x_init=None)
+
+        elif args.outer_alg == 'foml':
+            # First-Order MAML (explicit gradient)
+            task_outer_grad = flat_valid_grad
+
+        elif args.outer_alg == 'reptile':
+            # Reptile update
+            task_outer_grad = w_k - w_k_plus_1 # The "gradient" is the direction towards the updated weights
+
+        elif args.outer_alg == 'neumann':
+            # Neumann Series Approximation of the inverse Hessian-vector product
+            # This is a k-step approximation. Let's use k=1 for simplicity.
+            # The approximation is (I + inner_lr * H)^-1 * v approx (I - inner_lr * H) * v
+            # This requires the Hessian-vector product.
+            
+            # You will need to implement a Hessian-vector product function in your Learner class
+            # For now, let's assume you have one.
+            # A simple way to get it is using torch.autograd.grad again.
+            
+            train_loss = fast_learner.get_loss(task['x_train'], task['y_train'])
+            train_grad = torch.autograd.grad(train_loss, fast_learner.model.parameters(), create_graph=True)
+            flat_train_grad = torch.cat([g.contiguous().view(-1) for g in train_grad])
+            
+            # Hessian-vector product: H_train * flat_valid_grad
+            hvp = torch.autograd.grad(flat_train_grad, fast_learner.model.parameters(), grad_outputs=flat_valid_grad)
+            flat_hvp = torch.cat([g.contiguous().view(-1) for g in hvp])
+
+            # One step of Neumann approximation
+            task_outer_grad = flat_valid_grad - args.inner_lr * flat_hvp
+
+        else:
+            raise ValueError(f"Unknown outer_alg: {args.outer_alg}")
+
+# ... (rest of the loop)        
         meta_grad += (task_outer_grad/args.task_mb_size)
         losses[outstep] += (np.array([tl[0], vl_before, tl[-1], vl_after])/args.task_mb_size)
         accuracy[outstep] += np.array([tacc, vacc]) / args.task_mb_size
@@ -163,12 +221,14 @@ for outstep in tqdm(range(args.meta_steps)):
         plt.close('all')
         
         smoothed_acc = utils.smooth_vector(accuracy[:outstep], window_size=25)
+
         plt.figure(figsize=(10,6))
-        plt.plot(smoothed_acc)
+        plt.plot(smoothed_acc[:,0], label="Train post")   # column 0
+        plt.plot(smoothed_acc[:,1], label="Test post")    # column 1
         plt.ylim([50.0, 100.0])
         plt.xlim([0, args.meta_steps])
         plt.grid(True)
-        plt.legend(['Train post', 'Test post'], loc=4)
+        plt.legend(loc=4)
         plt.savefig(args.save_dir+'/accuracy.png', dpi=100)
         plt.clf()
         plt.close('all')
